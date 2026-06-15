@@ -154,7 +154,7 @@ impl Config {
     pub fn converter_for(&self, ext: &str) -> Option<&str> {
         let ext_lower = ext.to_lowercase();
         if self.convert_marker.iter().any(|e| e == &ext_lower) {
-            if which_exists("marker") {
+            if which_exists("marker_single") {
                 return Some("marker");
             }
             if self.convert_fallback == "pandoc" {

@@ -382,30 +382,75 @@ fn inject_frontmatter(
 }
 
 fn convert_file(tool: &str, input: &Path, output: &Path) -> bool {
-    let result = match tool {
-        "marker" => Command::new("marker")
-            .arg(input)
-            .arg("-o")
-            .arg(output)
-            .output(),
-        "pandoc" | _ => Command::new("pandoc")
-            .arg(input)
-            .arg("-t")
-            .arg("markdown")
-            .arg("-o")
-            .arg(output)
-            .output(),
-    };
+    match tool {
+        "marker" => convert_with_marker(input, output),
+        _ => convert_with_pandoc(input, output),
+    }
+}
 
-    match result {
+fn convert_with_pandoc(input: &Path, output: &Path) -> bool {
+    match Command::new("pandoc")
+        .arg(input)
+        .arg("-t")
+        .arg("markdown")
+        .arg("-o")
+        .arg(output)
+        .output()
+    {
         Ok(out) => {
             if !out.status.success() {
-                eprintln!(" {} error: {}", tool, String::from_utf8_lossy(&out.stderr));
+                eprintln!(" pandoc error: {}", String::from_utf8_lossy(&out.stderr));
             }
             out.status.success()
         }
         Err(e) => {
-            eprintln!(" Failed to run {}: {}", tool, e);
+            eprintln!(" Failed to run pandoc: {}", e);
+            false
+        }
+    }
+}
+
+/// marker_single writes output to <input_dir>/<stem>/<stem>.md
+/// We run it, then move the .md to the expected output path and clean up.
+fn convert_with_marker(input: &Path, output: &Path) -> bool {
+    let result = Command::new("marker_single")
+        .arg(input)
+        .arg("--disable_image_extraction")
+        .output();
+
+    match result {
+        Ok(out) => {
+            if !out.status.success() {
+                eprintln!(
+                    " marker_single error: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                return false;
+            }
+
+            // marker_single creates <parent>/<stem>/<stem>.md
+            let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let parent = input.parent().unwrap_or(Path::new("."));
+            let marker_dir = parent.join(stem);
+            let marker_md = marker_dir.join(format!("{}.md", stem));
+
+            if marker_md.exists() {
+                if let Err(e) = fs::rename(&marker_md, output) {
+                    eprintln!(" Failed to move marker output: {}", e);
+                    return false;
+                }
+                // Clean up the marker output directory
+                let _ = fs::remove_dir_all(&marker_dir);
+                true
+            } else {
+                eprintln!(" marker_single produced no output for {}", stem);
+                // Clean up if directory was created
+                let _ = fs::remove_dir_all(&marker_dir);
+                false
+            }
+        }
+        Err(e) => {
+            eprintln!(" Failed to run marker_single: {}", e);
             false
         }
     }
