@@ -12,6 +12,8 @@ struct ConvertConfig {
     #[serde(default)]
     marker: Vec<String>,
     #[serde(default)]
+    mutool: Vec<String>,
+    #[serde(default)]
     fallback: Option<String>,
 }
 
@@ -37,6 +39,7 @@ pub struct Config {
     destinations: HashMap<String, PathBuf>,
     convert_pandoc: Vec<String>,
     convert_marker: Vec<String>,
+    convert_mutool: Vec<String>,
     convert_fallback: String,
     actions: HashMap<String, String>,
     stale: HashMap<String, u64>,
@@ -76,6 +79,7 @@ impl Config {
                 destinations,
                 convert.pandoc,
                 convert.marker,
+                convert.mutool,
                 convert.fallback.unwrap_or_else(|| "pandoc".into()),
                 file.actions,
                 file.stale,
@@ -90,6 +94,7 @@ impl Config {
             Self::default_directories(),
             Self::default_categories(),
             HashMap::new(),
+            vec![],
             vec![],
             vec![],
             "pandoc".into(),
@@ -157,10 +162,14 @@ impl Config {
             if which_exists("marker_single") {
                 return Some("marker");
             }
-            if self.convert_fallback == "pandoc" {
-                return Some("pandoc");
+            let fallback = self.convert_fallback.as_str();
+            if !fallback.is_empty() {
+                return Some(fallback);
             }
             return None;
+        }
+        if self.convert_mutool.iter().any(|e| e == &ext_lower) {
+            return Some("mutool");
         }
         if self.convert_pandoc.iter().any(|e| e == &ext_lower) {
             return Some("pandoc");
@@ -175,6 +184,7 @@ impl Config {
         destinations: HashMap<String, PathBuf>,
         convert_pandoc: Vec<String>,
         convert_marker: Vec<String>,
+        convert_mutool: Vec<String>,
         convert_fallback: String,
         actions: HashMap<String, String>,
         stale: HashMap<String, u64>,
@@ -191,6 +201,7 @@ impl Config {
             destinations,
             convert_pandoc,
             convert_marker,
+            convert_mutool,
             convert_fallback,
             actions,
             stale,

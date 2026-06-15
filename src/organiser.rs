@@ -384,6 +384,7 @@ fn inject_frontmatter(
 fn convert_file(tool: &str, input: &Path, output: &Path) -> bool {
     match tool {
         "marker" => convert_with_marker(input, output),
+        "mutool" => convert_with_mutool(input, output),
         _ => convert_with_pandoc(input, output),
     }
 }
@@ -451,6 +452,35 @@ fn convert_with_marker(input: &Path, output: &Path) -> bool {
         }
         Err(e) => {
             eprintln!(" Failed to run marker_single: {}", e);
+            false
+        }
+    }
+}
+
+/// Use mutool to extract text from PDF and wrap as markdown.
+fn convert_with_mutool(input: &Path, output: &Path) -> bool {
+    let result = Command::new("mutool")
+        .args(["convert", "-F", "text", "-o", "-"])
+        .arg(input)
+        .output();
+
+    match result {
+        Ok(out) => {
+            if !out.status.success() {
+                eprintln!(" mutool error: {}", String::from_utf8_lossy(&out.stderr));
+                return false;
+            }
+            let text = String::from_utf8_lossy(&out.stdout);
+            match fs::write(output, text.as_ref()) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!(" Failed to write mutool output: {}", e);
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!(" Failed to run mutool: {}", e);
             false
         }
     }
