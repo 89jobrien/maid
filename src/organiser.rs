@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,7 @@ pub struct LogEntry {
 
 const LOG_FILE: &str = ".maid_log.json";
 const NOTES_EXTENSIONS: &[&str] = &["md", "mdx"];
+const SECS_PER_DAY: u64 = 86400;
 
 pub fn scan(dir: &Path, config: &Config) -> Result<Vec<FileEntry>, MaidError> {
     if !dir.is_dir() {
@@ -58,6 +60,8 @@ pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) {
     }
 
     println!("\nPreview - no files will be moved:\n");
+    let mut noted = 0;
+
     for entry in entries {
         let filename = entry
             .path
@@ -70,6 +74,22 @@ pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) {
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("");
+
+        let action = config.action_for(&entry.folder);
+
+        if action == "note" {
+            let age = file_age_days(&entry.path);
+            let stale_threshold = config.stale_days(&entry.folder);
+            let is_stale = stale_threshold.is_some_and(|t| age >= t);
+
+            if is_stale {
+                println!(" {} -> ARCHIVE (stale, {} days old)", filename, age);
+            } else {
+                println!(" {} [NOTED] ({} days old)", filename, age);
+                noted += 1;
+            }
+            continue;
+        }
 
         if let Some(tool) = config.converter_for(ext) {
             let md_name = swap_ext(filename, "md");
@@ -89,7 +109,11 @@ pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) {
         }
     }
 
-    println!("\n{} file(s) would be processed.", entries.len());
+    let actionable = entries.len() - noted;
+    println!(
+        "\n{} file(s) would be processed, {} noted in place.",
+        actionable, noted
+    );
 }
 
 pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<(), MaidError> {
@@ -97,6 +121,8 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
     let mut moved = 0;
     let mut converted = 0;
     let mut quarantined = 0;
+    let mut noted = 0;
+    let mut stale_archived = 0;
 
     for entry in entries {
         let filename_os = entry.path.file_name().ok_or_else(|| {
@@ -113,22 +139,51 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
             .and_then(|e| e.to_str())
             .unwrap_or("");
 
+        let action = config.action_for(&entry.folder);
+
+        // --- Note-only categories (e.g. diagnostics) ---
+        if action == "note" {
+            let age = file_age_days(&entry.path);
+            let stale_threshold = config.stale_days(&entry.folder);
+            let is_stale = stale_threshold.is_some_and(|t| age >= t);
+
+            if is_stale {
+                let archive_dir = config.archive_dir();
+                if !archive_dir.exists() {
+                    fs::create_dir_all(&archive_dir)?;
+                }
+                let now = Utc::now().format("%Y%m%d");
+                let archived_name = format!("{}-{}", now, filename);
+                let archive_dest = archive_dir.join(&archived_name);
+
+                log.push(LogEntry {
+                    from: entry.path.to_string_lossy().to_string(),
+                    to: archive_dest.to_string_lossy().to_string(),
+                });
+
+                fs::rename(&entry.path, &archive_dest)?;
+                println!(" {} -> ARCHIVED (stale, {} days old)", filename, age);
+                stale_archived += 1;
+            } else {
+                println!(" {} [NOTED] ({} days old)", filename, age);
+                noted += 1;
+            }
+            continue;
+        }
+
         // --- Conversion pipeline ---
         if let Some(tool) = config.converter_for(ext) {
             let md_name = swap_ext(&filename, "md");
             let md_path = entry.path.with_file_name(&md_name);
 
-            // Convert
             let ok = convert_file(tool, &entry.path, &md_path);
             if !ok {
                 eprintln!(" FAILED to convert: {}", filename);
                 continue;
             }
 
-            // Inject frontmatter on the new .md
             inject_frontmatter(&md_path, dir, Some(&entry.path))?;
 
-            // obfsck check on the converted markdown
             let is_clean = obfsck_check(&md_path);
             let md_dest_dir = if is_clean {
                 config.destination("notes", dir)
@@ -144,7 +199,6 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
             let md_destination = md_dest_dir.join(&md_name);
             fs::rename(&md_path, &md_destination)?;
 
-            // Archive the original
             let archive_dir = config.archive_dir();
             if !archive_dir.exists() {
                 fs::create_dir_all(&archive_dir)?;
@@ -190,7 +244,6 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
             fs::create_dir_all(&dest_dir)?;
         }
 
-        // Inject frontmatter for clean markdown files
         if is_notes_ext(ext) && !is_quarantined {
             inject_frontmatter(&entry.path, dir, None)?;
         }
@@ -220,8 +273,8 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
     fs::write(log_path, log_contents)?;
 
     println!(
-        "\n{} moved, {} converted, {} quarantined.",
-        moved, converted, quarantined
+        "\n{} moved, {} converted, {} quarantined, {} noted, {} stale archived.",
+        moved, converted, quarantined, noted, stale_archived
     );
 
     Ok(())
@@ -242,7 +295,6 @@ pub fn undo(dir: &Path) -> Result<(), MaidError> {
 
     for entry in &log {
         if entry.from == "(converted)" {
-            // Remove converted file, original was archived
             let _ = fs::remove_file(&entry.to);
             println!(" Removed converted: {}", entry.to);
         } else {
@@ -270,6 +322,15 @@ pub fn undo(dir: &Path) -> Result<(), MaidError> {
 
 fn is_notes_ext(ext: &str) -> bool {
     NOTES_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+}
+
+fn file_age_days(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|mtime| SystemTime::now().duration_since(mtime).ok())
+        .map(|d| d.as_secs() / SECS_PER_DAY)
+        .unwrap_or(0)
 }
 
 fn obfsck_check(path: &Path) -> bool {

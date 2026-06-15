@@ -25,6 +25,10 @@ struct ConfigFile {
     destinations: HashMap<String, String>,
     #[serde(default)]
     convert: Option<ConvertConfig>,
+    #[serde(default)]
+    actions: HashMap<String, String>,
+    #[serde(default)]
+    stale: HashMap<String, u64>,
 }
 
 pub struct Config {
@@ -34,6 +38,8 @@ pub struct Config {
     convert_pandoc: Vec<String>,
     convert_marker: Vec<String>,
     convert_fallback: String,
+    actions: HashMap<String, String>,
+    stale: HashMap<String, u64>,
 }
 
 impl Config {
@@ -71,6 +77,8 @@ impl Config {
                 convert.pandoc,
                 convert.marker,
                 convert.fallback.unwrap_or_else(|| "pandoc".into()),
+                file.actions,
+                file.stale,
             ))
         } else {
             Ok(Self::defaults())
@@ -85,6 +93,8 @@ impl Config {
             vec![],
             vec![],
             "pandoc".into(),
+            HashMap::new(),
+            HashMap::new(),
         )
     }
 
@@ -128,12 +138,22 @@ impl Config {
             })
     }
 
-    /// Returns the converter tool name for a given extension, or None if
-    /// the extension is not configured for conversion.
+    /// Returns the action for a category: "move" (default), "note", etc.
+    pub fn action_for(&self, category: &str) -> &str {
+        self.actions
+            .get(category)
+            .map(|s| s.as_str())
+            .unwrap_or("move")
+    }
+
+    /// Returns the stale threshold in days for a category, or None.
+    pub fn stale_days(&self, category: &str) -> Option<u64> {
+        self.stale.get(category).copied()
+    }
+
     pub fn converter_for(&self, ext: &str) -> Option<&str> {
         let ext_lower = ext.to_lowercase();
         if self.convert_marker.iter().any(|e| e == &ext_lower) {
-            // Check if marker is available, fall back if not
             if which_exists("marker") {
                 return Some("marker");
             }
@@ -148,6 +168,7 @@ impl Config {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         directories: Vec<PathBuf>,
         categories: HashMap<String, Vec<String>>,
@@ -155,6 +176,8 @@ impl Config {
         convert_pandoc: Vec<String>,
         convert_marker: Vec<String>,
         convert_fallback: String,
+        actions: HashMap<String, String>,
+        stale: HashMap<String, u64>,
     ) -> Self {
         let mut lookup = HashMap::new();
         for (folder, exts) in &categories {
@@ -169,6 +192,8 @@ impl Config {
             convert_pandoc,
             convert_marker,
             convert_fallback,
+            actions,
+            stale,
         }
     }
 
