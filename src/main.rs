@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
 mod config;
@@ -42,7 +42,18 @@ fn resolve_dirs(path: Option<PathBuf>, config: &Config) -> Vec<PathBuf> {
 }
 
 fn main() -> Result<(), MaidError> {
+    if std::env::args().nth(1).as_deref() == Some("completions") {
+        clap_complete::generate(
+            clap_complete_nushell::Nushell,
+            &mut Cli::command(),
+            "maid",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
+
     let cli = Cli::parse();
+
     let config = Config::load()?;
 
     match cli.command {
