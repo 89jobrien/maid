@@ -209,7 +209,7 @@ mod tests {
 
 ### Layout
 
-```
+```text
 maid/
 ├── src/
 │   ├── main.rs        # CLI entry, command dispatch

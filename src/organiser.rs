@@ -1,3 +1,5 @@
+//! Scans files, previews and applies organization rules, converts documents, and supports undo.
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,6 +27,7 @@ const LOG_FILE: &str = ".maid_log.json";
 const NOTES_EXTENSIONS: &[&str] = &["md", "mdx"];
 const SECS_PER_DAY: u64 = 86400;
 
+/// Collects visible files in a directory and classifies them by extension.
 pub fn scan(dir: &Path, config: &Config) -> Result<Vec<FileEntry>, MaidError> {
     if !dir.is_dir() {
         return Err(MaidError::InvalidDirectory(
@@ -53,6 +56,7 @@ pub fn scan(dir: &Path, config: &Config) -> Result<Vec<FileEntry>, MaidError> {
     Ok(entries)
 }
 
+/// Prints the actions Maid would take without changing any files.
 pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) {
     if entries.is_empty() {
         println!("Nothing to organise.");
@@ -116,6 +120,7 @@ pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) {
     );
 }
 
+/// Applies configured move, note, conversion, quarantine, and archive actions.
 pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<(), MaidError> {
     let mut log: Vec<LogEntry> = Vec::new();
     let mut moved = 0;
@@ -280,6 +285,7 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
     Ok(())
 }
 
+/// Reverses the moves recorded by the directory's most recent Maid run.
 pub fn undo(dir: &Path) -> Result<(), MaidError> {
     let log_path = dir.join(LOG_FILE);
 

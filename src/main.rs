@@ -1,3 +1,5 @@
+//! Parses `maid` commands and dispatches file organization, previews, undo, and completions.
+
 use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 

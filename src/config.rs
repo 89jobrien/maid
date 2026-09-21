@@ -1,3 +1,5 @@
+//! Loads Maid's file categories, destinations, actions, and conversion settings.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -46,6 +48,7 @@ pub struct Config {
 }
 
 impl Config {
+    /// Loads the user configuration, falling back to built-in defaults when absent.
     pub fn load() -> Result<Self, MaidError> {
         let path = Self::config_path();
         if path.as_ref().is_some_and(|p| p.exists()) {
@@ -89,6 +92,7 @@ impl Config {
         }
     }
 
+    /// Builds the default configuration for common home-directory folders and file types.
     pub fn defaults() -> Self {
         Self::build(
             Self::default_directories(),
@@ -103,6 +107,7 @@ impl Config {
         )
     }
 
+    /// Returns the configured category for a file extension, or `"unknown"`.
     pub fn classify(&self, ext: &str) -> &str {
         self.lookup
             .get(&ext.to_lowercase())
@@ -110,6 +115,7 @@ impl Config {
             .unwrap_or("unknown")
     }
 
+    /// Resolves a category's configured destination or a subdirectory of the source.
     pub fn destination(&self, category: &str, source_dir: &Path) -> PathBuf {
         if let Some(dest) = self.destinations.get(category) {
             dest.clone()
@@ -118,6 +124,7 @@ impl Config {
         }
     }
 
+    /// Returns the configured quarantine directory or Maid's data-directory fallback.
     pub fn quarantine_dir(&self) -> PathBuf {
         self.destinations
             .get("quarantine")
@@ -130,6 +137,7 @@ impl Config {
             })
     }
 
+    /// Returns the configured archive directory or the default repository archive path.
     pub fn archive_dir(&self) -> PathBuf {
         self.destinations
             .get("archive")
@@ -156,6 +164,7 @@ impl Config {
         self.stale.get(category).copied()
     }
 
+    /// Selects the configured converter for an extension, honoring Marker fallback settings.
     pub fn converter_for(&self, ext: &str) -> Option<&str> {
         let ext_lower = ext.to_lowercase();
         if self.convert_marker.iter().any(|e| e == &ext_lower) {
@@ -276,6 +285,7 @@ impl Config {
     }
 }
 
+/// Expands a leading `~/` against the user's home directory when available.
 pub fn expand_path(path: &str) -> PathBuf {
     if path.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {

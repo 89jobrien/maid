@@ -1,3 +1,5 @@
+//! Defines errors returned while configuring, organizing, and undoing Maid operations.
+
 use std::fmt;
 
 #[derive(Debug)]
