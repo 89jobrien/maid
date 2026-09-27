@@ -34,6 +34,8 @@ enum Command {
         /// Target directory (defaults to configured directories)
         path: Option<PathBuf>,
     },
+    /// Generate a Nushell completion script
+    Completions,
 }
 
 fn resolve_dirs(path: Option<PathBuf>, config: &Config) -> Vec<PathBuf> {
@@ -44,7 +46,10 @@ fn resolve_dirs(path: Option<PathBuf>, config: &Config) -> Vec<PathBuf> {
 }
 
 fn main() -> Result<(), MaidError> {
-    if std::env::args().nth(1).as_deref() == Some("completions") {
+    let cli = Cli::parse();
+
+    // Completion generation must not depend on a valid config, so it runs before loading one.
+    if let Command::Completions = cli.command {
         clap_complete::generate(
             clap_complete_nushell::Nushell,
             &mut Cli::command(),
@@ -53,8 +58,6 @@ fn main() -> Result<(), MaidError> {
         );
         return Ok(());
     }
-
-    let cli = Cli::parse();
 
     let config = Config::load()?;
 
@@ -79,6 +82,7 @@ fn main() -> Result<(), MaidError> {
                 organiser::undo(&dir)?;
             }
         }
+        Command::Completions => {}
     }
 
     Ok(())

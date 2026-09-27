@@ -26,6 +26,8 @@ pub struct LogEntry {
 const LOG_FILE: &str = ".maid_log.json";
 const NOTES_EXTENSIONS: &[&str] = &["md", "mdx"];
 const SECS_PER_DAY: u64 = 86400;
+const AUDIT_SUMMARY_PREFIX: &str = "Audit report:";
+const AUDIT_TOTAL_MARKER: &str = "total match(es)";
 
 /// Collects visible files in a directory and classifies them by extension.
 pub fn scan(dir: &Path, config: &Config) -> Result<Vec<FileEntry>, MaidError> {
@@ -130,12 +132,10 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
     let mut stale_archived = 0;
 
     for entry in entries {
-        let filename_os = entry.path.file_name().ok_or_else(|| {
-            MaidError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Invalid filename",
-            ))
-        })?;
+        let filename_os = entry
+            .path
+            .file_name()
+            .ok_or_else(|| MaidError::Io(std::io::Error::other("Invalid filename")))?;
         let filename = filename_os.to_string_lossy();
 
         let ext = entry
@@ -339,13 +339,70 @@ fn file_age_days(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn obfsck_check(path: &Path) -> bool {
-    let result = Command::new("obfsck").arg("check").arg(path).output();
+/// Extracts the total match count from an `obfsck redact --audit` report.
+///
+/// obfsck writes the summary to stderr as:
+/// `Audit report: <n> pattern type(s), <m> total match(es)`
+///
+/// Returns `None` when the summary is absent or malformed, which callers treat
+/// as "no verdict available" rather than as clean or dirty.
+fn audit_match_count(report: &str) -> Option<usize> {
+    let summary = report
+        .lines()
+        .find(|line| line.trim_start().starts_with(AUDIT_SUMMARY_PREFIX))?;
+    let (counts, _) = summary.split_once(AUDIT_TOTAL_MARKER)?;
+    let digits: String = counts
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.chars().rev().collect::<String>().parse().ok()
+}
 
-    match result {
-        Ok(output) => output.status.success(),
-        Err(_) => {
-            eprintln!(" WARNING: obfsck not found, skipping secret check");
+/// Secret-scans a file, returning true when it is safe to keep.
+///
+/// Detection reads the match count from `obfsck redact --audit`. obfsck's
+/// `redact` exit code is always 0 whether or not it finds anything, so it
+/// carries no verdict, and comparing redacted output against the original is
+/// unreliable because obfsck normalises trailing newlines and CRLF endings.
+///
+/// Every failure to obtain a verdict — obfsck missing, non-zero exit, or an
+/// unreadable report — is reported as clean with a warning. Treating a tool
+/// error as "dirty" quarantines every note, which is the failure this
+/// integration previously had.
+fn obfsck_check(path: &Path) -> bool {
+    let Ok(output) = Command::new("obfsck")
+        .arg("redact")
+        .arg("--audit")
+        .arg(path)
+        .output()
+    else {
+        eprintln!(" WARNING: obfsck not found, skipping secret check");
+        return true;
+    };
+
+    if !output.status.success() {
+        eprintln!(
+            " WARNING: obfsck exited {} on {}, skipping secret check",
+            output.status,
+            path.display()
+        );
+        return true;
+    }
+
+    let report = String::from_utf8_lossy(&output.stderr);
+    match audit_match_count(&report) {
+        Some(0) => true,
+        Some(total) => {
+            eprintln!(" {} secret match(es) in {}", total, path.display());
+            false
+        }
+        None => {
+            eprintln!(
+                " WARNING: no obfsck audit report for {}, skipping secret check",
+                path.display()
+            );
             true
         }
     }
@@ -496,5 +553,135 @@ fn swap_ext(filename: &str, new_ext: &str) -> String {
     match filename.rsplit_once('.') {
         Some((stem, _)) => format!("{}.{}", stem, new_ext),
         None => format!("{}.{}", filename, new_ext),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swap_ext_replaces_final_extension() {
+        assert_eq!(swap_ext("invoice.pdf", "md"), "invoice.md");
+        assert_eq!(swap_ext("a.b.pdf", "md"), "a.b.md");
+    }
+
+    #[test]
+    fn swap_ext_appends_when_no_extension() {
+        assert_eq!(swap_ext("README", "md"), "README.md");
+    }
+
+    #[test]
+    fn notes_extensions_are_recognised() {
+        assert!(is_notes_ext("md"));
+        assert!(is_notes_ext("mdx"));
+        assert!(is_notes_ext("MD"));
+        assert!(!is_notes_ext("txt"));
+        assert!(!is_notes_ext(""));
+    }
+
+    #[test]
+    fn log_entry_round_trips_through_json() {
+        let entries = vec![
+            LogEntry {
+                from: "/dl/invoice.pdf".into(),
+                to: "/archive/20260927-invoice.pdf".into(),
+            },
+            LogEntry {
+                from: "(converted)".into(),
+                to: "/notes/invoice.md".into(),
+            },
+        ];
+        let json = serde_json::to_string(&entries).expect("serialise log");
+        let back: Vec<LogEntry> = serde_json::from_str(&json).expect("deserialise log");
+
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].from, "/dl/invoice.pdf");
+        assert_eq!(back[0].to, "/archive/20260927-invoice.pdf");
+        assert_eq!(back[1].from, "(converted)");
+        assert_eq!(back[1].to, "/notes/invoice.md");
+    }
+
+    #[test]
+    fn scan_rejects_missing_directory() {
+        let config = crate::config::Config::defaults();
+        let result = scan(Path::new("/definitely/not/here/maid-test"), &config);
+        assert!(matches!(result, Err(MaidError::InvalidDirectory(_))));
+    }
+
+    #[test]
+    fn scan_skips_hidden_files_and_subdirectories() {
+        let dir = std::env::temp_dir().join("maid-scan-hidden-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("subdir")).expect("create temp dir");
+        fs::write(dir.join("visible.jpg"), b"x").expect("write visible file");
+        fs::write(dir.join(".hidden.jpg"), b"x").expect("write hidden file");
+        fs::write(dir.join("subdir/nested.jpg"), b"x").expect("write nested file");
+
+        let config = crate::config::Config::defaults();
+        let entries = scan(&dir, &config).expect("scan succeeds");
+
+        let names: Vec<String> = entries
+            .iter()
+            .map(|e| {
+                e.path
+                    .file_name()
+                    .expect("name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        assert_eq!(names, vec!["visible.jpg".to_string()]);
+        assert_eq!(entries[0].folder, "images");
+
+        fs::remove_dir_all(&dir).expect("clean up temp dir");
+    }
+
+    #[test]
+    fn file_age_days_is_zero_for_missing_file() {
+        assert_eq!(
+            file_age_days(Path::new("/definitely/not/here/maid-test")),
+            0
+        );
+    }
+
+    #[test]
+    fn audit_match_count_reads_clean_report() {
+        let report = "Audit report: 0 pattern type(s), 0 total match(es)\n";
+        assert_eq!(audit_match_count(report), Some(0));
+    }
+
+    #[test]
+    fn audit_match_count_reads_dirty_report() {
+        let report = "Audit report: 1 pattern type(s), 1 total match(es)\n  \
+                      [REDACTED-AWS-KEY]                  1\n";
+        assert_eq!(audit_match_count(report), Some(1));
+    }
+
+    #[test]
+    fn audit_match_count_reads_multi_digit_total() {
+        let report = "Audit report: 3 pattern type(s), 42 total match(es)\n";
+        assert_eq!(audit_match_count(report), Some(42));
+    }
+
+    #[test]
+    fn audit_match_count_ignores_absence_of_a_report() {
+        assert_eq!(audit_match_count(""), None);
+        assert_eq!(audit_match_count("some unrelated stderr\n"), None);
+    }
+
+    #[test]
+    fn audit_match_count_rejects_malformed_total() {
+        // Present but unparseable: must be None, never a fabricated zero.
+        assert_eq!(
+            audit_match_count("Audit report: many total match(es)\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn audit_match_count_tolerates_a_summary_without_the_total_marker() {
+        assert_eq!(audit_match_count("Audit report: 0 pattern type(s)\n"), None);
     }
 }

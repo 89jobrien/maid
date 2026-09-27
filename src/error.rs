@@ -31,9 +31,6 @@ impl From<std::io::Error> for MaidError {
 
 impl From<serde_json::Error> for MaidError {
     fn from(e: serde_json::Error) -> Self {
-        MaidError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))
+        MaidError::Io(std::io::Error::other(e.to_string()))
     }
 }

@@ -287,10 +287,10 @@ impl Config {
 
 /// Expands a leading `~/` against the user's home directory when available.
 pub fn expand_path(path: &str) -> PathBuf {
-    if path.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(&path[2..]);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
     }
     PathBuf::from(path)
 }
@@ -301,4 +301,184 @@ fn which_exists(cmd: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a config whose classification table is exactly `pairs`.
+    fn with_categories(pairs: &[(&str, &[&str])]) -> Config {
+        let mut c = Config::defaults();
+        c.lookup = pairs
+            .iter()
+            .flat_map(|(folder, exts)| {
+                exts.iter()
+                    .map(move |e| (e.to_lowercase(), (*folder).to_string()))
+            })
+            .collect();
+        c
+    }
+
+    #[test]
+    fn classify_maps_extension_to_folder() {
+        let c = with_categories(&[("images", &["jpg", "png"])]);
+        assert_eq!(c.classify("jpg"), "images");
+        assert_eq!(c.classify("png"), "images");
+    }
+
+    #[test]
+    fn classify_is_case_insensitive() {
+        let c = with_categories(&[("images", &["jpg"])]);
+        assert_eq!(c.classify("JPG"), "images");
+        assert_eq!(c.classify("JpG"), "images");
+    }
+
+    #[test]
+    fn classify_falls_back_to_unknown() {
+        let c = with_categories(&[("images", &["jpg"])]);
+        assert_eq!(c.classify("xyz"), "unknown");
+        assert_eq!(c.classify(""), "unknown");
+    }
+
+    #[test]
+    fn default_categories_cover_documented_folders() {
+        let c = Config::defaults();
+        assert_eq!(c.classify("jpg"), "images");
+        assert_eq!(c.classify("pdf"), "documents");
+        assert_eq!(c.classify("mp4"), "video");
+        assert_eq!(c.classify("mp3"), "audio");
+        assert_eq!(c.classify("rs"), "code");
+        assert_eq!(c.classify("zip"), "archives");
+    }
+
+    #[test]
+    fn markdown_is_not_a_default_category() {
+        let c = Config::defaults();
+        assert_eq!(c.classify("md"), "unknown");
+        assert_eq!(c.classify("mdx"), "unknown");
+    }
+
+    #[test]
+    fn destination_defaults_to_subdirectory_of_source() {
+        let c = Config::defaults();
+        assert_eq!(
+            c.destination("images", Path::new("/tmp/dl")),
+            PathBuf::from("/tmp/dl/images")
+        );
+    }
+
+    #[test]
+    fn destination_prefers_configured_path() {
+        let mut c = Config::defaults();
+        c.destinations
+            .insert("images".into(), PathBuf::from("/vault/img"));
+        assert_eq!(
+            c.destination("images", Path::new("/tmp/dl")),
+            PathBuf::from("/vault/img")
+        );
+    }
+
+    #[test]
+    fn action_defaults_to_move() {
+        let c = Config::defaults();
+        assert_eq!(c.action_for("images"), "move");
+        assert_eq!(c.action_for("unconfigured"), "move");
+    }
+
+    #[test]
+    fn action_reads_configured_value() {
+        let mut c = Config::defaults();
+        c.actions.insert("diagnostics".into(), "note".into());
+        assert_eq!(c.action_for("diagnostics"), "note");
+    }
+
+    #[test]
+    fn stale_days_absent_by_default() {
+        assert_eq!(Config::defaults().stale_days("images"), None);
+    }
+
+    #[test]
+    fn stale_days_reads_configured_value() {
+        let mut c = Config::defaults();
+        c.stale.insert("diagnostics".into(), 90);
+        assert_eq!(c.stale_days("diagnostics"), Some(90));
+    }
+
+    #[test]
+    fn no_conversion_configured_by_default() {
+        let c = Config::defaults();
+        assert_eq!(c.converter_for("pdf"), None);
+        assert_eq!(c.converter_for("docx"), None);
+    }
+
+    #[test]
+    fn converter_selects_mutool_then_pandoc() {
+        let mut c = Config::defaults();
+        c.convert_mutool = vec!["pdf".into()];
+        c.convert_pandoc = vec!["docx".into()];
+        assert_eq!(c.converter_for("pdf"), Some("mutool"));
+        assert_eq!(c.converter_for("docx"), Some("pandoc"));
+        assert_eq!(c.converter_for("jpg"), None);
+    }
+
+    #[test]
+    fn converter_matching_is_case_insensitive() {
+        let mut c = Config::defaults();
+        c.convert_pandoc = vec!["docx".into()];
+        assert_eq!(c.converter_for("DOCX"), Some("pandoc"));
+    }
+
+    #[test]
+    fn converter_marker_resolves_to_marker_or_fallback() {
+        let mut c = Config::defaults();
+        c.convert_marker = vec!["pdf".into()];
+        c.convert_fallback = "pandoc".into();
+        assert!(matches!(
+            c.converter_for("pdf"),
+            Some("marker") | Some("pandoc")
+        ));
+    }
+
+    #[test]
+    fn converter_marker_without_fallback_or_binary_is_none() {
+        let mut c = Config::defaults();
+        c.convert_marker = vec!["pdf".into()];
+        c.convert_fallback = String::new();
+        if !which_exists("marker_single") {
+            assert_eq!(c.converter_for("pdf"), None);
+        }
+    }
+
+    #[test]
+    fn expand_path_expands_home_prefix() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        assert_eq!(expand_path("~/Downloads"), home.join("Downloads"));
+    }
+
+    #[test]
+    fn expand_path_leaves_other_paths_alone() {
+        assert_eq!(expand_path("/abs/path"), PathBuf::from("/abs/path"));
+        assert_eq!(expand_path("rel/path"), PathBuf::from("rel/path"));
+        assert_eq!(expand_path("~"), PathBuf::from("~"));
+    }
+
+    #[test]
+    fn quarantine_and_archive_have_fallbacks() {
+        let c = Config::defaults();
+        assert!(c.quarantine_dir().to_string_lossy().contains("quarantine"));
+        assert!(c.archive_dir().to_string_lossy().contains("_RepoArchive"));
+    }
+
+    #[test]
+    fn quarantine_and_archive_honour_config() {
+        let mut c = Config::defaults();
+        c.destinations
+            .insert("quarantine".into(), PathBuf::from("/q"));
+        c.destinations.insert("archive".into(), PathBuf::from("/a"));
+        assert_eq!(c.quarantine_dir(), PathBuf::from("/q"));
+        assert_eq!(c.archive_dir(), PathBuf::from("/a"));
+    }
 }
