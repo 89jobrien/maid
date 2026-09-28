@@ -73,7 +73,7 @@ fn main() -> Result<(), MaidError> {
             for dir in resolve_dirs(path, &config) {
                 println!("==> {}", dir.display());
                 let entries = organiser::scan(&dir, &config)?;
-                organiser::preview(&entries, &dir, &config);
+                organiser::preview(&entries, &dir, &config)?;
             }
         }
         Command::Undo { path } => {

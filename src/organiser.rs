@@ -62,10 +62,10 @@ pub fn scan(dir: &Path, config: &Config) -> Result<Vec<FileEntry>, MaidError> {
 }
 
 /// Prints the actions Maid would take without changing any files.
-pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) {
+pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) -> Result<(), MaidError> {
     if entries.is_empty() {
         println!("Nothing to organise.");
-        return;
+        return Ok(());
     }
 
     println!("\nPreview - no files will be moved:\n");
@@ -103,7 +103,7 @@ pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) {
         if let Some(tool) = config.converter_for(ext) {
             let md_name = swap_ext(filename, "md");
             println!(
-                " {} -> CONVERT ({}) -> {} + archive original",
+                " {} -> CONVERT ({}) -> {} + archive original; secret scan may divert it",
                 filename, tool, md_name
             );
         } else if is_notes_ext(ext) && !obfsck_check(&entry.path) {
@@ -114,7 +114,9 @@ pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) {
             );
         } else {
             let dest = config.destination(&entry.folder, dir);
-            println!(" {} -> {}", filename, dest.display());
+            let resolved =
+                resolve_destination(dest.join(entry.path.file_name().unwrap_or_default()))?;
+            println!(" {} -> {}", filename, resolved.display());
         }
     }
 
@@ -123,6 +125,8 @@ pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) {
         "\n{} file(s) would be processed, {} noted in place.",
         actionable, noted
     );
+
+    Ok(())
 }
 
 /// Applies configured move, note, conversion, quarantine, and archive actions.
