@@ -303,6 +303,22 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
     Ok(())
 }
 
+/// Restores `to` to `from` for one log entry.
+///
+/// Returns `MaidError::UndoFailed` if a file already exists at `from`;
+/// never overwrites user data. Unlike `resolve_destination` this does not
+/// suffix: the original filename recorded in the journal is authoritative.
+fn restore_entry(from: &Path, to: &Path) -> Result<(), MaidError> {
+    if from.exists() {
+        return Err(MaidError::UndoFailed(format!(
+            "cannot restore: {} already exists",
+            from.display()
+        )));
+    }
+    fs::rename(to, from)?;
+    Ok(())
+}
+
 /// Reverses the moves recorded by the directory's most recent Maid run.
 pub fn undo(dir: &Path) -> Result<(), MaidError> {
     let (log_path, log) = read_log(dir)?;
@@ -312,7 +328,7 @@ pub fn undo(dir: &Path) -> Result<(), MaidError> {
             let _ = fs::remove_file(&entry.to);
             println!(" Removed converted: {}", entry.to);
         } else {
-            fs::rename(&entry.to, &entry.from)?;
+            restore_entry(Path::new(&entry.from), Path::new(&entry.to))?;
             println!(" Restored: {}", entry.from);
         }
     }
@@ -947,6 +963,37 @@ mod tests {
         let (path, back) = read_log(&dir).expect("read");
         assert_eq!(path, dir.join(JOURNAL_FILE));
         assert_eq!(back[0].from, "/dl/new.md");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn restore_entry_refuses_to_overwrite_existing_file() {
+        let dir = temp_dir("restore-guard");
+        let to = dir.join("inbox.md");
+        let from = dir.join("original.md");
+        fs::write(&to, b"moved\n").expect("seed to");
+        fs::write(&from, b"user wrote this after the run\n").expect("seed from");
+
+        let result = restore_entry(&from, &to);
+        assert!(matches!(result, Err(MaidError::UndoFailed(_))));
+        assert_eq!(
+            fs::read_to_string(&from).expect("read from"),
+            "user wrote this after the run\n"
+        );
+        assert!(to.exists(), "the moved file must be left in place");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn restore_entry_moves_when_destination_is_free() {
+        let dir = temp_dir("restore-ok");
+        let to = dir.join("inbox.md");
+        let from = dir.join("original.md");
+        fs::write(&to, b"moved\n").expect("seed to");
+
+        restore_entry(&from, &to).expect("restores");
+        assert!(!to.exists(), "source must be gone");
+        assert_eq!(fs::read_to_string(&from).expect("read from"), "moved\n");
         cleanup(&dir);
     }
 

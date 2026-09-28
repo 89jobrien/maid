@@ -426,7 +426,28 @@ cargo clippy -p maid -- -D warnings           → zero warnings
 
 ---
 
-## Task 5: Append-only JSONL journal
+## Task 5: Append-only JSONL journal — MERGED WITH TASK 6
+
+> **Correction applied 2026-09-28 during execution.** Tasks 5 and 6 were
+> executed as a **single commit** `21343c2`, for the same `dead_code` reason
+> as Tasks 1–4: `read_log` and `LEGACY_LOG_FILE` are unreachable until
+> `undo` is rewired, so a Task 5-only commit fails `-D warnings`.
+>
+> **Bug the tests caught during execution.** Converting `log.push(...)` to
+> `append_log_entry(...)` mechanically preserved the original ordering —
+> journal _before_ `fs::rename` — which records moves that never happened
+> and makes `undo` replay a non-existent file. The durability test caught it
+> (`log.len()` was 2, expected 1). The design doc had already specified
+> after-rename; the implementation must follow, at every write site. Both
+> the primary move and the stale archive were reordered. The convert path
+> was already correct, since its rename precedes the appends.
+>
+> **Test bug also caught:** the durability test configured categories with
+> `"ok.md"` and `"blocked.md"`, but `classify()` is called with the bare
+> extension (`md`). Both files fell through to `unknown` and the test failed
+> for the wrong reason. It also needed two _distinct_ extensions, because
+> matching both on `md` collides in the flat extension→category table — the
+> exact footgun the README warns about. Rewritten to use `rs` and `txt`.
 
 **Crate**: `maid`
 **File(s)**: `src/organiser.rs`
