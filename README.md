@@ -37,8 +37,8 @@ Downloads/
 
 ### Prerequisites
 
-- [Rust](https://www.rust-lang.org/tools/install) (1.85 or higher — the crate
-  uses edition 2024)
+- [Rust](https://www.rust-lang.org/tools/install) (1.88 or higher — the crate
+  uses edition 2024 and a let-chain, stable since 1.88. CI verifies this floor.)
 
 ### Build from source
 

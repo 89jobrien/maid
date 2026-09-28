@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on any rustc or clippy warning, not just clippy's -D pass.
+  RUSTFLAGS: -D warnings
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: taiki-e/install-action@nextest
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: quality
+
+      # Shift-left ordering: formatting and lints before the expensive gates,
+      # so the cheapest failures surface first.
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Type check
+        run: cargo check --workspace --all-targets
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo nextest run --workspace
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      # Unit tests cannot catch a binary that compiles but cannot start — a
+      # malformed clap command, or a panic before main's dispatch.
+      - name: Smoke test
+        run: |
+          ./target/release/maid --help
+          ./target/release/maid --version
+          ./target/release/maid completions | grep -q 'module completions'
+          # A bad path must fail, not exit 0. Asserts the exit contract
+          # rather than the message, which is Debug-formatted.
+          ! ./target/release/maid preview /nonexistent-maid-ci-path
+
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@nextest
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+
+      # maid is a single-user macOS tool and its destination resolver relies on
+      # Path::exists() deferring to filesystem case sensitivity, which differs
+      # between APFS and ext4. Run the suite on the platform it actually ships on.
+      - name: Test
+        run: cargo nextest run --workspace
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Proves the declared rust-version is real. 1.88 is the floor because
+      # config.rs uses a let-chain in expand_path, stable since 1.88. Only
+      # check and test run here: 1.88's rustfmt and clippy are older than the
+      # stable toolchain's and would disagree with it, so those stay on the
+      # stable job.
+      - uses: dtolnay/rust-toolchain@1.88
+
+      - uses: taiki-e/install-action@nextest
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: Type check
+        run: cargo check --workspace --all-targets
+
+      - name: Test
+        run: cargo nextest run --workspace
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Rust equivalent of `npm audit`: advisory database check, no config.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

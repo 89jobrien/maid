@@ -11,7 +11,7 @@ use config::Config;
 use error::MaidError;
 
 #[derive(Parser)]
-#[command(name = "maid", about = "A clean file organiser")]
+#[command(name = "maid", about = "A clean file organiser", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

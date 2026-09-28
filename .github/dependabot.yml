@@ -1,0 +1,28 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # Group patch bumps so routine dependency churn arrives as one PR
+    # instead of five, keeping the branch-protection gate meaningful.
+    groups:
+      cargo-patch:
+        update-types:
+          - patch
+      cargo-minor:
+        update-types:
+          - minor
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        update-types:
+          - patch
+          - minor

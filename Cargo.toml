@@ -2,6 +2,10 @@
 name = "maid"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "A clean, fast CLI tool that organises files into subfolders by type, converts documents to markdown, and routes them to Obsidian vaults"
+license = "MIT"
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
