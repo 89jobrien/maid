@@ -10,6 +10,14 @@ repository = "https://github.com/89jobrien/maid"
 homepage = "https://github.com/89jobrien/maid"
 keywords = ["files", "organize", "obsidian", "markdown", "cli"]
 categories = ["command-line-utilities", "filesystem"]
+# Keep internal agent and design notes out of the published tarball.
+exclude = [
+    ".DS_Store",
+    ".release-trace.json",
+    ".ctx",
+    "AGENTS.md",
+    "CLAUDE.md",
+]
 
 # The crates.io package is `filemaid`, but the installed command stays `maid`.
 [[bin]]
