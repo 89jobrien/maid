@@ -26,6 +26,7 @@ pub struct LogEntry {
 const LOG_FILE: &str = ".maid_log.json";
 const NOTES_EXTENSIONS: &[&str] = &["md", "mdx"];
 const SECS_PER_DAY: u64 = 86400;
+const MAX_DISAMBIGUATION_ATTEMPTS: u32 = 1000;
 const AUDIT_SUMMARY_PREFIX: &str = "Audit report:";
 const AUDIT_TOTAL_MARKER: &str = "total match(es)";
 
@@ -159,7 +160,7 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
                 }
                 let now = Utc::now().format("%Y%m%d");
                 let archived_name = format!("{}-{}", now, filename);
-                let archive_dest = archive_dir.join(&archived_name);
+                let archive_dest = resolve_destination(archive_dir.join(&archived_name))?;
 
                 log.push(LogEntry {
                     from: entry.path.to_string_lossy().to_string(),
@@ -201,7 +202,7 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
                 fs::create_dir_all(&md_dest_dir)?;
             }
 
-            let md_destination = md_dest_dir.join(&md_name);
+            let md_destination = resolve_destination(md_dest_dir.join(&md_name))?;
             fs::rename(&md_path, &md_destination)?;
 
             let archive_dir = config.archive_dir();
@@ -210,7 +211,7 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
             }
             let now = Utc::now().format("%Y%m%d");
             let archived_name = format!("{}-{}", now, filename);
-            let archive_dest = archive_dir.join(&archived_name);
+            let archive_dest = resolve_destination(archive_dir.join(&archived_name))?;
             fs::rename(&entry.path, &archive_dest)?;
 
             log.push(LogEntry {
@@ -253,7 +254,7 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
             inject_frontmatter(&entry.path, dir, None)?;
         }
 
-        let destination = dest_dir.join(filename_os);
+        let destination = resolve_destination(dest_dir.join(filename_os))?;
 
         log.push(LogEntry {
             from: entry.path.to_string_lossy().to_string(),
@@ -556,9 +557,70 @@ fn swap_ext(filename: &str, new_ext: &str) -> String {
     }
 }
 
+/// Splits `name` into (stem, extension) for suffix insertion.
+///
+/// A name with no dot yields `(name, "")`. A pure dotfile such as
+/// `.gitignore` has no stem, so it is returned whole as the stem — this
+/// keeps `.gitignore` from becoming `-1.gitignore`.
+fn split_name(name: &str) -> (&str, &str) {
+    match name.rsplit_once('.') {
+        Some(("", _)) => (name, ""),
+        Some((stem, ext)) => (stem, ext),
+        None => (name, ""),
+    }
+}
+
+/// Builds the `n`-th disambiguated candidate for `stem`/`ext`.
+fn disambiguated(stem: &str, ext: &str, n: u32) -> String {
+    if ext.is_empty() {
+        format!("{}-{}", stem, n)
+    } else {
+        format!("{}-{}.{}", stem, n, ext)
+    }
+}
+
+/// Resolves `desired` to a path that does not exist by inserting a `-N`
+/// suffix before the extension, incrementing from 1.
+///
+/// Fast path: returns `desired` unchanged when that path is already free,
+/// so non-colliding files keep byte-identical destinations.
+///
+/// Returns `MaidError::DestinationExhausted` when
+/// `MAX_DISAMBIGUATION_ATTEMPTS` candidates are exhausted. Never falls back
+/// to overwriting.
+fn resolve_destination(desired: PathBuf) -> Result<PathBuf, MaidError> {
+    if !desired.exists() {
+        return Ok(desired);
+    }
+
+    let parent = desired
+        .parent()
+        .map_or_else(PathBuf::new, Path::to_path_buf);
+    let name = desired
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (stem, ext) = split_name(&name);
+
+    for n in 1..=MAX_DISAMBIGUATION_ATTEMPTS {
+        let candidate = parent.join(disambiguated(stem, ext, n));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(MaidError::DestinationExhausted(format!(
+        "no free name for '{}' in '{}' after {} attempts",
+        name,
+        parent.display(),
+        MAX_DISAMBIGUATION_ATTEMPTS
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn swap_ext_replaces_final_extension() {
@@ -683,5 +745,129 @@ mod tests {
     #[test]
     fn audit_match_count_tolerates_a_summary_without_the_total_marker() {
         assert_eq!(audit_match_count("Audit report: 0 pattern type(s)\n"), None);
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("maid-test-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn cleanup(dir: &Path) {
+        fs::remove_dir_all(dir).expect("clean up temp dir");
+    }
+
+    fn notes_config(dest: &Path) -> crate::config::Config {
+        let categories = HashMap::from([("notes".to_string(), vec!["md".to_string()])]);
+        let destinations = HashMap::from([("notes".to_string(), dest.to_path_buf())]);
+        crate::config::test_config_with(categories, destinations)
+    }
+
+    #[test]
+    fn colliding_names_across_source_directories_both_survive() {
+        let root = temp_dir("collision");
+        let a = root.join("a");
+        let b = root.join("b");
+        let inbox = root.join("inbox");
+        fs::create_dir_all(&a).expect("a");
+        fs::create_dir_all(&b).expect("b");
+        fs::write(a.join("collision.md"), b"# From A\n").expect("a file");
+        fs::write(b.join("collision.md"), b"# From B\n").expect("b file");
+
+        let config = notes_config(&inbox);
+
+        let entries_a = scan(&a, &config).expect("scan a");
+        organise(&a, &entries_a, &config).expect("organise a");
+        let entries_b = scan(&b, &config).expect("scan b");
+        organise(&b, &entries_b, &config).expect("organise b");
+
+        let names: Vec<String> = fs::read_dir(&inbox)
+            .expect("read inbox")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "both files must survive: {:?}", names);
+
+        undo(&a).expect("undo a");
+        undo(&b).expect("undo b");
+
+        assert!(a.join("collision.md").exists(), "A must be restored");
+        assert!(b.join("collision.md").exists(), "B must be restored");
+
+        // Restored content carries maid's provenance frontmatter, so assert
+        // identity rather than byte equality: each file must come back to its
+        // own origin directory with its own body. Before the collision fix
+        // this returned B's body under A's path.
+        let a_text = fs::read_to_string(a.join("collision.md")).expect("read a");
+        let b_text = fs::read_to_string(b.join("collision.md")).expect("read b");
+
+        assert!(a_text.contains("# From A"), "A must hold A's body");
+        assert!(!a_text.contains("# From B"), "A must not hold B's body");
+        assert!(a_text.contains("original_dir: a"), "A keeps its own origin");
+
+        assert!(b_text.contains("# From B"), "B must hold B's body");
+        assert!(!b_text.contains("# From A"), "B must not hold A's body");
+        assert!(b_text.contains("original_dir: b"), "B keeps its own origin");
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn resolve_destination_returns_free_path_unchanged() {
+        let dir = temp_dir("resolve-fast");
+        let desired = dir.join("invoice.md");
+        let resolved = resolve_destination(desired.clone()).expect("resolves");
+        assert_eq!(resolved, desired);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_destination_suffixes_before_extension() {
+        let dir = temp_dir("resolve-suffix");
+        fs::write(dir.join("invoice.md"), b"x").expect("seed");
+        let resolved = resolve_destination(dir.join("invoice.md")).expect("resolves");
+        assert_eq!(resolved.file_name().expect("name"), "invoice-1.md");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_destination_increments_past_existing_candidates() {
+        let dir = temp_dir("resolve-increment");
+        fs::write(dir.join("invoice.md"), b"x").expect("seed");
+        fs::write(dir.join("invoice-1.md"), b"x").expect("seed");
+        let resolved = resolve_destination(dir.join("invoice.md")).expect("resolves");
+        assert_eq!(resolved.file_name().expect("name"), "invoice-2.md");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_destination_handles_names_without_extension() {
+        let dir = temp_dir("resolve-noext");
+        fs::write(dir.join("README"), b"x").expect("seed");
+        let resolved = resolve_destination(dir.join("README")).expect("resolves");
+        assert_eq!(resolved.file_name().expect("name"), "README-1");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_destination_treats_dotfile_as_stem() {
+        let dir = temp_dir("resolve-dotfile");
+        fs::write(dir.join(".gitignore"), b"x").expect("seed");
+        let resolved = resolve_destination(dir.join(".gitignore")).expect("resolves");
+        assert_eq!(resolved.file_name().expect("name"), ".gitignore-1");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_destination_errors_when_candidates_are_exhausted() {
+        let dir = temp_dir("resolve-exhaust");
+        fs::write(dir.join("invoice.md"), b"x").expect("seed");
+        for n in 1..=MAX_DISAMBIGUATION_ATTEMPTS {
+            fs::write(dir.join(format!("invoice-{}.md", n)), b"x").expect("seed");
+        }
+        let result = resolve_destination(dir.join("invoice.md"));
+        assert!(matches!(result, Err(MaidError::DestinationExhausted(_))));
+        cleanup(&dir);
     }
 }

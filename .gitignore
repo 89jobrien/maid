@@ -1,1 +1,5 @@
 /target
+
+# Scratch space for in-progress plan and commit-message work. Tracked plan
+# documents live in .ctx/godmode/plans/ and are committed; this is not.
+.ctx/_WORKING_DIR/

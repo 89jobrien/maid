@@ -303,6 +303,27 @@ fn which_exists(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Builds a config with caller-supplied categories and destinations.
+/// Test-only: lets `organiser` tests exercise routing without touching
+/// the user's real `config.toml`.
+#[cfg(test)]
+pub(crate) fn test_config_with(
+    categories: HashMap<String, Vec<String>>,
+    destinations: HashMap<String, PathBuf>,
+) -> Config {
+    Config::build(
+        vec![],
+        categories,
+        destinations,
+        vec![],
+        vec![],
+        vec![],
+        "pandoc".to_string(),
+        HashMap::new(),
+        HashMap::new(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
