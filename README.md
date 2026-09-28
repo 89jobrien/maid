@@ -92,20 +92,25 @@ maid preview ~/Downloads
 
 The output below assumes a config with `pdf` in `convert.mutool` and `md` in
 `categories.notes`; with stock defaults the same run just moves everything into
-per-type subfolders.
+per-type subfolders. Each line shows the **resolved final path**, so what you
+read here is exactly what `maid run` will produce.
 
 ```text
 ==> /Users/joe/Downloads
 
 Preview - no files will be moved:
 
- invoice.pdf -> CONVERT (mutool) -> invoice.md + archive original
- photo.jpg -> /Users/joe/Downloads/images
+ invoice.pdf -> CONVERT (mutool) -> invoice.md + archive original; secret scan may divert it
+ photo.jpg -> /Users/joe/Downloads/images/photo.jpg
  notes.md -> QUARANTINE (/Users/joe/.local/share/maid/quarantine)
- script.py -> /Users/joe/Downloads/code
+ script.py -> /Users/joe/Downloads/code/script.py
 
 4 file(s) would be processed, 0 noted in place.
 ```
+
+A converted file is the one case preview cannot fully predict: whether its
+markdown output is quarantined depends on a secret scan of a file that does not
+exist yet, so preview says so rather than promising a destination.
 
 An empty directory prints `Nothing to organise.`
 
@@ -119,9 +124,9 @@ maid run ~/Downloads
 ==> /Users/joe/Downloads
  mutool error: format error: cannot find version marker
  FAILED to convert: invoice.pdf
- photo.jpg -> /Users/joe/Downloads/images
+ photo.jpg -> /Users/joe/Downloads/images/photo.jpg
  notes.md -> QUARANTINED (/Users/joe/.local/share/maid/quarantine)
- script.py -> /Users/joe/Downloads/code
+ script.py -> /Users/joe/Downloads/code/script.py
 
 3 moved, 0 converted, 1 quarantined, 0 noted, 0 stale archived.
 ```
@@ -145,11 +150,16 @@ maid undo ~/Downloads
 Note that undo **deletes** generated markdown rather than moving it back — the
 original document was archived, not left in place.
 
-Undo reads the log, replays every entry in order, then removes the folders Maid
-created. Folders that are not empty are left alone.
+Undo reads the journal, replays every entry in order, then removes the folders
+Maid created. Folders that are not empty are left alone.
+
+Restoring never overwrites. If something already occupies a file's original
+location, `maid undo` reports the error and stops rather than replacing it —
+which means a restore conflict leaves the undo partially applied. That is
+deliberate: a loud partial state is recoverable, a silent overwrite is not.
 
 **Only the most recent run in a given directory is undoable** — each `maid run`
-overwrites that directory's log.
+replaces that directory's journal.
 
 ### Completions
 
@@ -221,11 +231,37 @@ converted_from: /Users/joe/Downloads/invoice.pdf
 
 `converted_from` is only present for converted files.
 
+### Collision handling
+
+Maid never overwrites an existing file. If the destination is taken, it inserts
+a `-N` suffix before the extension and increments until it finds a free name, so
+`invoice.md` becomes `invoice-1.md`, then `invoice-2.md`. This applies to every
+destination: moved files, quarantined files, and both archive paths. `preview`
+shows the resolved name, so you always see the filename that will land on disk.
+
+If no free name is found after 1000 attempts, the run fails with an error rather
+than overwriting.
+
+This matters most when several source directories share one destination — say
+`~/Downloads`, `~/Desktop` and `~/Documents` all feeding a single notes folder.
+Two files with the same name will no longer clobber each other, but they will
+also no longer merge into one note.
+
 ### Log file
 
-`maid run` writes `.maid_log.json` into each target directory, recording every
-move and archive. `maid undo` reads it, reverses each entry, deletes the folders
-it created, and removes the log.
+`maid run` writes `.maid_log.jsonl` into each target directory, appending one
+JSON line per completed move **as each move finishes**. Recording per move rather
+than at the end means a run that fails partway still leaves a replayable record
+of everything that already happened.
+
+`maid undo` reads that journal, reverses each entry, deletes the folders it
+created, and removes the journal. If a journal in the older `.maid_log.json`
+array format is found instead, it is read for backwards compatibility and
+removed after a successful undo.
+
+> **Not atomic.** Checking for a free name and then renaming are two steps, so
+> two concurrent `maid run` processes could pick the same name. Only the most
+> recent run in a directory is undoable — a later run replaces the journal.
 
 ---
 
