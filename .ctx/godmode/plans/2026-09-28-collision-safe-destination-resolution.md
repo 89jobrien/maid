@@ -25,7 +25,29 @@ Maid must never silently destroy a file, and every move it performs must remain 
 
 ---
 
-## Task 1: Add `DestinationExhausted` error variant
+## Task 1: Add `DestinationExhausted` error variant — MERGED INTO TASK 3+4
+
+> **Correction applied 2026-09-28 during execution.** Tasks 1, 2, 3 and 4 were
+> executed as a **single commit** `4616d1c`, not four.
+>
+> **Root cause:** under `-D warnings`, `dead_code` fires on the production
+> build for any item not yet reached by a call site. Split across commits,
+> the error variant is never constructed (until Task 3), and then
+> `resolve_destination`, `split_name`, `disambiguated` and
+> `MAX_DISAMBIGUATION_ATTEMPTS` are all never used (until Task 4). So three
+> consecutive commits would each have failed the mandated gate. The plan's
+> 2–5 minute granularity was incompatible with the project's lint policy.
+>
+> The fix is structural, not a suppression: `#[allow(dead_code)]` was
+> rejected per the systematic-debugging rule against silencing warnings to
+> pass a check. The smallest unit that both compiles clean and exercises the
+> resolver is variant + helpers + wiring, so that is the commit boundary.
+>
+> **Also learned:** `organise` injects provenance frontmatter into markdown,
+> so a restored `.md` is _not_ byte-identical to the original. The collision
+> regression test therefore asserts identity (`# From A` in `a/`,
+> `original_dir: a`) rather than byte equality. A byte-equality assertion
+> fails even though the fix is correct.
 
 **Crate**: `maid`
 **File(s)**: `src/error.rs`

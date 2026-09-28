@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -23,7 +24,8 @@ pub struct LogEntry {
     pub to: String,
 }
 
-const LOG_FILE: &str = ".maid_log.json";
+const JOURNAL_FILE: &str = ".maid_log.jsonl";
+const LEGACY_LOG_FILE: &str = ".maid_log.json";
 const NOTES_EXTENSIONS: &[&str] = &["md", "mdx"];
 const SECS_PER_DAY: u64 = 86400;
 const MAX_DISAMBIGUATION_ATTEMPTS: u32 = 1000;
@@ -125,12 +127,16 @@ pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) {
 
 /// Applies configured move, note, conversion, quarantine, and archive actions.
 pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<(), MaidError> {
-    let mut log: Vec<LogEntry> = Vec::new();
     let mut moved = 0;
     let mut converted = 0;
     let mut quarantined = 0;
     let mut noted = 0;
     let mut stale_archived = 0;
+
+    // Start a fresh journal for this run. Required: append_log_entry opens in
+    // append mode, so without this a run would inherit the previous run's
+    // entries and undo would replay stale moves.
+    fs::write(dir.join(JOURNAL_FILE), "")?;
 
     for entry in entries {
         let filename_os = entry
@@ -162,12 +168,18 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
                 let archived_name = format!("{}-{}", now, filename);
                 let archive_dest = resolve_destination(archive_dir.join(&archived_name))?;
 
-                log.push(LogEntry {
-                    from: entry.path.to_string_lossy().to_string(),
-                    to: archive_dest.to_string_lossy().to_string(),
-                });
-
                 fs::rename(&entry.path, &archive_dest)?;
+
+                // Journal only after the move landed, so a failed rename never
+                // leaves an entry undo would try to replay.
+                append_log_entry(
+                    dir,
+                    &LogEntry {
+                        from: entry.path.to_string_lossy().to_string(),
+                        to: archive_dest.to_string_lossy().to_string(),
+                    },
+                )?;
+
                 println!(" {} -> ARCHIVED (stale, {} days old)", filename, age);
                 stale_archived += 1;
             } else {
@@ -214,14 +226,20 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
             let archive_dest = resolve_destination(archive_dir.join(&archived_name))?;
             fs::rename(&entry.path, &archive_dest)?;
 
-            log.push(LogEntry {
-                from: entry.path.to_string_lossy().to_string(),
-                to: archive_dest.to_string_lossy().to_string(),
-            });
-            log.push(LogEntry {
-                from: "(converted)".to_string(),
-                to: md_destination.to_string_lossy().to_string(),
-            });
+            append_log_entry(
+                dir,
+                &LogEntry {
+                    from: entry.path.to_string_lossy().to_string(),
+                    to: archive_dest.to_string_lossy().to_string(),
+                },
+            )?;
+            append_log_entry(
+                dir,
+                &LogEntry {
+                    from: "(converted)".to_string(),
+                    to: md_destination.to_string_lossy().to_string(),
+                },
+            )?;
 
             if is_clean {
                 println!(
@@ -256,12 +274,17 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
 
         let destination = resolve_destination(dest_dir.join(filename_os))?;
 
-        log.push(LogEntry {
-            from: entry.path.to_string_lossy().to_string(),
-            to: destination.to_string_lossy().to_string(),
-        });
-
         fs::rename(&entry.path, &destination)?;
+
+        // Journal only after the move landed, so a failed rename never leaves
+        // an entry undo would try to replay.
+        append_log_entry(
+            dir,
+            &LogEntry {
+                from: entry.path.to_string_lossy().to_string(),
+                to: destination.to_string_lossy().to_string(),
+            },
+        )?;
 
         if is_quarantined {
             eprintln!(" {} -> QUARANTINED ({})", filename, dest_dir.display());
@@ -271,12 +294,6 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
             moved += 1;
         }
     }
-
-    // Write undo log
-    let log_path = dir.join(LOG_FILE);
-    let log_contents =
-        serde_json::to_string_pretty(&log).map_err(|e| MaidError::UndoFailed(e.to_string()))?;
-    fs::write(log_path, log_contents)?;
 
     println!(
         "\n{} moved, {} converted, {} quarantined, {} noted, {} stale archived.",
@@ -288,17 +305,7 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
 
 /// Reverses the moves recorded by the directory's most recent Maid run.
 pub fn undo(dir: &Path) -> Result<(), MaidError> {
-    let log_path = dir.join(LOG_FILE);
-
-    if !log_path.exists() {
-        return Err(MaidError::UndoFailed(
-            "No undo log found. Has maid been run here?".to_string(),
-        ));
-    }
-
-    let contents = fs::read_to_string(&log_path)?;
-    let log: Vec<LogEntry> =
-        serde_json::from_str(&contents).map_err(|e| MaidError::UndoFailed(e.to_string()))?;
+    let (log_path, log) = read_log(dir)?;
 
     for entry in &log {
         if entry.from == "(converted)" {
@@ -617,6 +624,54 @@ fn resolve_destination(desired: PathBuf) -> Result<PathBuf, MaidError> {
     )))
 }
 
+/// Appends one `LogEntry` as a single JSON line, creating the journal if
+/// absent. Called immediately after each successful move so a run that fails
+/// partway still leaves a replayable record of everything already done.
+fn append_log_entry(dir: &Path, entry: &LogEntry) -> Result<(), MaidError> {
+    let line = serde_json::to_string(entry)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(JOURNAL_FILE))?;
+    writeln!(file, "{}", line)?;
+    Ok(())
+}
+
+/// Reads the undo journal for `dir`, preferring `JOURNAL_FILE` and falling
+/// back to the legacy `LEGACY_LOG_FILE` array. Unparseable trailing lines are
+/// skipped so a torn final append does not lose earlier entries.
+///
+/// Returns the file it actually read so the caller removes the right one.
+fn read_log(dir: &Path) -> Result<(PathBuf, Vec<LogEntry>), MaidError> {
+    let journal = dir.join(JOURNAL_FILE);
+    if journal.exists() {
+        let contents = fs::read_to_string(&journal)?;
+        let mut entries = Vec::new();
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(entry) = serde_json::from_str::<LogEntry>(trimmed) {
+                entries.push(entry);
+            }
+        }
+        return Ok((journal, entries));
+    }
+
+    let legacy = dir.join(LEGACY_LOG_FILE);
+    if legacy.exists() {
+        let contents = fs::read_to_string(&legacy)?;
+        let entries: Vec<LogEntry> =
+            serde_json::from_str(&contents).map_err(|e| MaidError::UndoFailed(e.to_string()))?;
+        return Ok((legacy, entries));
+    }
+
+    Err(MaidError::UndoFailed(
+        "No undo log found. Has maid been run here?".to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,6 +817,137 @@ mod tests {
         let categories = HashMap::from([("notes".to_string(), vec!["md".to_string()])]);
         let destinations = HashMap::from([("notes".to_string(), dest.to_path_buf())]);
         crate::config::test_config_with(categories, destinations)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_records_completed_moves_when_a_later_move_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_dir("durable");
+        let src = root.join("src");
+        let good = root.join("good");
+        let locked = root.join("locked");
+        fs::create_dir_all(&src).expect("src");
+        fs::create_dir_all(&good).expect("good");
+        fs::create_dir_all(&locked).expect("locked");
+        fs::write(src.join("ok.rs"), b"fn main() {}\n").expect("ok file");
+        fs::write(src.join("blocked.txt"), b"blocked\n").expect("blocked file");
+
+        // r-x: readable and traversable, not writable. The move into it fails
+        // with EACCES, after the first file has already been moved.
+        // Extensions are distinct and neither is a notes extension: matching
+        // both on `md` would collide in the flat extension->category table,
+        // and `md` would drag in the obfsck gate.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).expect("lock dir");
+
+        let categories = HashMap::from([
+            ("ok".to_string(), vec!["rs".to_string()]),
+            ("blocked".to_string(), vec!["txt".to_string()]),
+        ]);
+        let destinations = HashMap::from([
+            ("ok".to_string(), good.clone()),
+            ("blocked".to_string(), locked.clone()),
+        ]);
+        let config = crate::config::test_config_with(categories, destinations);
+
+        let entries = scan(&src, &config).expect("scan");
+        let result = organise(&src, &entries, &config);
+        assert!(result.is_err(), "the locked move must fail");
+
+        let (log_path, log) = read_log(&src).expect("journal readable");
+        assert_eq!(log.len(), 1, "the completed move must be recorded");
+        assert_eq!(log[0].from, src.join("ok.rs").to_string_lossy());
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).expect("unlock");
+        fs::remove_file(&log_path).expect("drop journal");
+        cleanup(&root);
+    }
+
+    #[test]
+    fn journal_round_trips_one_entry_per_line() {
+        let dir = temp_dir("journal-roundtrip");
+        let entries = vec![
+            LogEntry {
+                from: "/dl/a.md".into(),
+                to: "/inbox/a.md".into(),
+            },
+            LogEntry {
+                from: "(converted)".into(),
+                to: "/inbox/b.md".into(),
+            },
+        ];
+        for entry in &entries {
+            append_log_entry(&dir, entry).expect("append");
+        }
+        let (path, back) = read_log(&dir).expect("read");
+        assert_eq!(path, dir.join(JOURNAL_FILE));
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].from, "/dl/a.md");
+        assert_eq!(back[1].from, "(converted)");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn read_log_skips_a_torn_trailing_line() {
+        let dir = temp_dir("journal-torn");
+        let good = LogEntry {
+            from: "/dl/a.md".into(),
+            to: "/inbox/a.md".into(),
+        };
+        append_log_entry(&dir, &good).expect("append good");
+        let path = dir.join(JOURNAL_FILE);
+        let mut contents = fs::read_to_string(&path).expect("read");
+        contents.push_str("{\"from\":\"/dl/b.md\",\"to\":\"/inbo");
+        fs::write(&path, contents).expect("append torn");
+
+        let (_, back) = read_log(&dir).expect("read");
+        assert_eq!(back.len(), 1, "earlier entries must survive a torn tail");
+        assert_eq!(back[0].from, "/dl/a.md");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn read_log_falls_back_to_the_legacy_array() {
+        let dir = temp_dir("journal-legacy");
+        let legacy = vec![LogEntry {
+            from: "/dl/old.md".into(),
+            to: "/inbox/old.md".into(),
+        }];
+        fs::write(
+            dir.join(LEGACY_LOG_FILE),
+            serde_json::to_string_pretty(&legacy).expect("serialise"),
+        )
+        .expect("write legacy");
+
+        let (path, back) = read_log(&dir).expect("read");
+        assert_eq!(path, dir.join(LEGACY_LOG_FILE));
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].from, "/dl/old.md");
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn read_log_prefers_the_journal_over_the_legacy_file() {
+        let dir = temp_dir("journal-both");
+        append_log_entry(
+            &dir,
+            &LogEntry {
+                from: "/dl/new.md".into(),
+                to: "/inbox/new.md".into(),
+            },
+        )
+        .expect("append");
+        fs::write(
+            dir.join(LEGACY_LOG_FILE),
+            r#"[{"from":"/dl/old.md","to":"/inbox/old.md"}]"#,
+        )
+        .expect("write legacy");
+
+        let (path, back) = read_log(&dir).expect("read");
+        assert_eq!(path, dir.join(JOURNAL_FILE));
+        assert_eq!(back[0].from, "/dl/new.md");
+        cleanup(&dir);
     }
 
     #[test]
