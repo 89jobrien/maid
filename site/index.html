@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="maid sorts files into subfolders by type, converts documents to markdown with frontmatter, quarantines anything a secret scan flags, and can undo the last run.">
+    <title>maid &mdash; File organiser with preview, convert, and undo</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <nav class="nav" aria-label="Primary">
+      <a href="index.html" class="brand" aria-current="page">maid</a>
+      <a href="#ladder">The ladder</a>
+      <a href="#safety">Safety</a>
+      <a href="#config">Config</a>
+      <a href="#commands">Commands</a>
+    </nav>
+
+    <main id="main">
+      <header class="hero">
+        <div class="hero-grid">
+          <div>
+            <span class="eyebrow reveal">Rust 2024 / files, documents, notes</span>
+            <h1 class="reveal">maid</h1>
+            <p class="tagline reveal">Sorts a directory into subfolders by file type, turns documents into markdown with frontmatter, and quarantines anything a secret scan catches before it reaches the vault.</p>
+            <div class="actions reveal">
+              <a class="button button-primary" href="#ladder">How a file is claimed</a>
+              <a class="button" href="https://github.com/89jobrien/maid">Source</a>
+            </div>
+          </div>
+          <div class="terminal reveal" aria-label="Example maid preview">
+            <div class="terminal-bar"><span class="label">maid / preview ~/Downloads</span></div>
+            <pre><span class="prompt">$</span> maid preview ~/Downloads
+<span class="cmt">==> /Users/joe/Downloads
+
+Preview - no files will be moved:
+
+ invoice.pdf -> CONVERT (mutool) -> invoice.md + archive
+ photo.jpg  -> ~/Downloads/images/photo.jpg
+ notes.md   -> QUARANTINE (~/.local/share/maid/quarantine)
+ script.py  -> ~/Downloads/code/script.py
+
+4 file(s) would be processed, 0 noted in place.</span></pre>
+          </div>
+        </div>
+      </header>
+
+      <section id="ladder" class="reveal">
+        <h2>The action ladder</h2>
+        <p>
+          <code>maid run</code> applies one action per file in a fixed order,
+          and <strong>the first match wins</strong>. What matters is not where
+          a file ends up but which rule claimed it first.
+        </p>
+        <div class="ladder">
+          <div class="action">
+            <span class="action-n">01</span>
+            <span class="action-name">note</span>
+            <span class="action-what">The category's action is <code>note</code> and the file is older than its <code>stale</code> threshold: archive it as <code>YYYYMMDD-&lt;name&gt;</code>. Otherwise leave it in place and count it as noted.</span>
+          </div>
+          <div class="action is-convert">
+            <span class="action-n">02</span>
+            <span class="action-name">convert</span>
+            <span class="action-what">The extension appears in a <code>convert</code> list: convert to markdown, inject frontmatter, secret-scan the result, and archive the original. Clean output lands in the notes destination.</span>
+          </div>
+          <div class="action is-quarantine">
+            <span class="action-n">03</span>
+            <span class="action-name">notes gate</span>
+            <span class="action-what">Markdown is scanned by <code>obfsck redact --audit</code>. A match quarantines the file; a clean result gets frontmatter and moves normally.</span>
+          </div>
+          <div class="action">
+            <span class="action-n">04</span>
+            <span class="action-name">move</span>
+            <span class="action-what">Everything else goes to its category destination. This is the fallback, so it claims whatever the first three rungs declined.</span>
+          </div>
+        </div>
+        <p class="note">
+          Rung 3 is the only one that can put a file somewhere the caller did not
+          ask for. Quarantine is a different destination, not a severity level
+          on the others — which is why it is the one rung in its own hue.
+        </p>
+      </section>
+
+      <section id="safety" class="reveal">
+        <h2>Safety</h2>
+        <p>
+          maid moves real files, so most of its behaviour is a refusal to move
+          them badly.
+        </p>
+        <div class="stat-strip">
+          <div class="stat">
+            <span class="n">0</span>
+            <span class="d">Hidden files touched</span>
+          </div>
+          <div class="stat">
+            <span class="n">1</span>
+            <span class="d">Directory deep, never recursive</span>
+          </div>
+          <div class="stat">
+            <span class="n">1000</span>
+            <span class="d">Name attempts before failing</span>
+          </div>
+          <div class="stat">
+            <span class="n">1</span>
+            <span class="d">Undoable run per directory</span>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Rule</th><th>Why it is there</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Never overwrites</td>
+                <td>A taken destination becomes <code>name-1.ext</code>, then <code>name-2.ext</code>, up to 1000 attempts, then the run fails.</td>
+              </tr>
+              <tr>
+                <td>Undo never overwrites either</td>
+                <td>A restore conflict reports and stops, leaving a loud partial state, because a partial state is recoverable and a silent overwrite is not.</td>
+              </tr>
+              <tr>
+                <td>Hidden files and subdirectories</td>
+                <td>Skipped entirely. Scans are one level deep.</td>
+              </tr>
+              <tr>
+                <td>Per-move journal</td>
+                <td>Each move is recorded as it finishes, so a run that dies partway still leaves a replayable record.</td>
+              </tr>
+              <tr>
+                <td>Gate errs open, not closed</td>
+                <td>If <code>obfsck</code> is missing or its verdict is unreadable, maid warns and treats the file as clean — failing closed would quarantine every note.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="config" class="reveal">
+        <h2>Configuration</h2>
+        <p>
+          <code>~/.config/maid/config.toml</code>, falling back to the platform
+          config directory. Every table is optional; stock defaults apply.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Table</th><th>Controls</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>directories</code></td><td>What to process when no path is given. Defaults to Documents, Downloads, Desktop.</td></tr>
+              <tr><td><code>categories</code></td><td>Extension to folder. Matched case-insensitively, <code>unknown</code> as fallback.</td></tr>
+              <tr><td><code>destinations</code></td><td>Absolute targets per category, including <code>quarantine</code> and <code>archive</code>.</td></tr>
+              <tr><td><code>convert</code></td><td>Which extensions go through pandoc, mutool, or marker, and the fallback when marker is absent.</td></tr>
+              <tr><td><code>actions</code> / <code>stale</code></td><td>Which categories are noted rather than moved, and after how many days.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          Do not list one extension under two categories. The table is keyed by
+          extension, so a duplicate resolves to whichever category is inserted
+          last — and category iteration order is not deterministic.
+        </p>
+      </section>
+
+      <section id="commands" class="reveal">
+        <h2>Commands</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Command</th><th>Effect</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>maid preview &lt;path&gt;</code></td><td>Prints the resolved final path for every file. Moves nothing.</td></tr>
+              <tr><td><code>maid run &lt;path&gt;</code></td><td>Applies the ladder and journals each move.</td></tr>
+              <tr><td><code>maid undo &lt;path&gt;</code></td><td>Reverses the most recent run in that directory.</td></tr>
+              <tr><td><code>maid completions</code></td><td>Emits a Nushell completion script.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          The recommended loop is three commands: <code>preview</code>,
+          <code>run</code>, and <code>undo</code> if the preview was wrong.
+          Preview cannot fully predict conversion, because whether the
+          generated markdown trips the secret gate depends on a file that
+          does not exist yet — so it says so rather than promising a
+          destination.
+        </p>
+      </section>
+
+      <footer class="site-foot reveal">
+        <p><a href="https://github.com/89jobrien/maid">Source on GitHub</a> &middot; MIT licensed.</p>
+      </footer>
+    </main>
+  </body>
+</html>
