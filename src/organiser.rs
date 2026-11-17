@@ -10,12 +10,44 @@ use std::time::SystemTime;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::config::{Config, ResolvedRoute};
 use crate::error::MaidError;
 
 pub struct FileEntry {
     pub path: PathBuf,
     pub folder: String,
+    /// Filename-pattern route that overrides the extension-based destination.
+    pub route: Option<ResolvedRoute>,
+}
+
+impl FileEntry {
+    /// The directory this entry should land in, honouring a route if present.
+    ///
+    /// Quarantine still wins: a file whose secrets were detected is diverted by
+    /// the caller before this is consulted.
+    fn dest_dir(&self, dir: &Path, config: &Config) -> PathBuf {
+        match &self.route {
+            Some(route) => route.destination().to_path_buf(),
+            None => config.destination(&self.folder, dir),
+        }
+    }
+
+    /// The final filename for this entry, applying the route's rename template
+    /// when one is configured. `ext` is the destination extension, which differs
+    /// from the source extension for converted files.
+    fn target_name(&self, ext: &str, fallback: &str) -> String {
+        match &self.route {
+            Some(route) => {
+                let stem = self
+                    .path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                route.target_name(stem, ext, &self.path, fallback)
+            }
+            None => fallback.to_string(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -54,7 +86,16 @@ pub fn scan(dir: &Path, config: &Config) -> Result<Vec<FileEntry>, MaidError> {
             let path = e.path();
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let folder = config.classify(ext).to_string();
-            FileEntry { path, folder }
+            let route = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| config.route_for(n))
+                .cloned();
+            FileEntry {
+                path,
+                folder,
+                route,
+            }
         })
         .collect();
 
@@ -101,10 +142,15 @@ pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) -> Result<(),
         }
 
         if let Some(tool) = config.converter_for(ext) {
-            let md_name = swap_ext(filename, "md");
+            let md_name = entry.target_name("md", &swap_ext(filename, "md"));
+            let route_note = entry
+                .route
+                .as_ref()
+                .map(|r| format!(" via route '{}' -> {}", r.name(), r.destination().display()))
+                .unwrap_or_default();
             println!(
-                " {} -> CONVERT ({}) -> {} + archive original; secret scan may divert it",
-                filename, tool, md_name
+                " {} -> CONVERT ({}) -> {}{}; secret scan may divert it",
+                filename, tool, md_name, route_note
             );
         } else if is_notes_ext(ext) && !obfsck_check(&entry.path) {
             println!(
@@ -113,9 +159,9 @@ pub fn preview(entries: &[FileEntry], dir: &Path, config: &Config) -> Result<(),
                 config.quarantine_dir().display()
             );
         } else {
-            let dest = config.destination(&entry.folder, dir);
-            let resolved =
-                resolve_destination(dest.join(entry.path.file_name().unwrap_or_default()))?;
+            let dest = entry.dest_dir(dir, config);
+            let name = entry.target_name(ext, filename);
+            let resolved = resolve_destination(dest.join(name))?;
             println!(" {} -> {}", filename, resolved.display());
         }
     }
@@ -195,7 +241,8 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
 
         // --- Conversion pipeline ---
         if let Some(tool) = config.converter_for(ext) {
-            let md_name = swap_ext(&filename, "md");
+            let default_md = swap_ext(&filename, "md");
+            let md_name = entry.target_name("md", &default_md);
             let md_path = entry.path.with_file_name(&md_name);
 
             let ok = convert_file(tool, &entry.path, &md_path);
@@ -208,7 +255,9 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
 
             let is_clean = obfsck_check(&md_path);
             let md_dest_dir = if is_clean {
-                config.destination("notes", dir)
+                // A route overrides the "notes" default for converted output;
+                // otherwise converted markdown lands where notes are configured.
+                entry.dest_dir(dir, config)
             } else {
                 quarantined += 1;
                 config.quarantine_dir()
@@ -265,7 +314,7 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
         let dest_dir = if is_quarantined {
             config.quarantine_dir()
         } else {
-            config.destination(&entry.folder, dir)
+            entry.dest_dir(dir, config)
         };
 
         if !dest_dir.exists() {
@@ -276,7 +325,8 @@ pub fn organise(dir: &Path, entries: &[FileEntry], config: &Config) -> Result<()
             inject_frontmatter(&entry.path, dir, None)?;
         }
 
-        let destination = resolve_destination(dest_dir.join(filename_os))?;
+        let routed_name = entry.target_name(ext, &filename);
+        let destination = resolve_destination(dest_dir.join(routed_name))?;
 
         fs::rename(&entry.path, &destination)?;
 
@@ -502,12 +552,23 @@ fn convert_with_pandoc(input: &Path, output: &Path) -> bool {
     }
 }
 
-/// marker_single writes output to <input_dir>/<stem>/<stem>.md
-/// We run it, then move the .md to the expected output path and clean up.
+/// marker_single writes output to <output_dir>/<stem>/<stem>.md
+/// We pass the input's parent as --output_dir, then move the .md to the
+/// expected output path and clean up.
+///
+/// --output_dir must be explicit. When it is omitted this build defaults to a
+/// `conversion_results` directory inside the marker-pdf package itself, so the
+/// output lands in the tool's site-packages and never reaches the input's
+/// directory — the conversion silently succeeds and no file appears.
 fn convert_with_marker(input: &Path, output: &Path) -> bool {
+    let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let parent = input.parent().unwrap_or(Path::new("."));
+
     let result = Command::new("marker_single")
         .arg(input)
         .arg("--disable_image_extraction")
+        .arg("--output_dir")
+        .arg(parent)
         .output();
 
     match result {
@@ -520,9 +581,7 @@ fn convert_with_marker(input: &Path, output: &Path) -> bool {
                 return false;
             }
 
-            // marker_single creates <parent>/<stem>/<stem>.md
-            let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            let parent = input.parent().unwrap_or(Path::new("."));
+            // marker_single creates <output_dir>/<stem>/<stem>.md
             let marker_dir = parent.join(stem);
             let marker_md = marker_dir.join(format!("{}.md", stem));
 
@@ -837,6 +896,72 @@ mod tests {
         let categories = HashMap::from([("notes".to_string(), vec!["md".to_string()])]);
         let destinations = HashMap::from([("notes".to_string(), dest.to_path_buf())]);
         crate::config::test_config_with(categories, destinations)
+    }
+
+    /// Config whose `notes` destination is deliberately a decoy, so a passing
+    /// test proves the route won rather than the default destination.
+    fn routed_config(route_dest: &Path, default_dest: &Path) -> crate::config::Config {
+        let categories = HashMap::from([("notes".to_string(), vec!["md".to_string()])]);
+        let destinations = HashMap::from([("notes".to_string(), default_dest.to_path_buf())]);
+        let routes = vec![crate::config::Route {
+            name: "persona".into(),
+            patterns: vec!["*persona*".into()],
+            destination: route_dest.to_string_lossy().to_string(),
+            rename: Some("persona-{date}.md".into()),
+            date_source: crate::config::DateSource::Stem,
+        }];
+        crate::config::test_config_with_routes(categories, destinations, routes)
+    }
+
+    #[test]
+    fn route_overrides_default_destination_and_renames_file() {
+        let root = temp_dir("route-move");
+        let src = root.join("src");
+        let routed = root.join("routed");
+        let decoy = root.join("decoy");
+        fs::create_dir_all(&src).expect("src");
+        fs::write(src.join("team_persona-20260427.md"), b"# persona\n").expect("write");
+
+        let config = routed_config(&routed, &decoy);
+        let entries = scan(&src, &config).expect("scan");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].route.as_ref().map(|r| r.name()),
+            Some("persona"),
+            "the route must attach at scan time"
+        );
+
+        organise(&src, &entries, &config).expect("organise");
+
+        assert!(
+            routed.join("persona-2026-04-27.md").exists(),
+            "routed file must be renamed and placed by the route"
+        );
+        assert!(
+            !decoy.exists(),
+            "the default destination must not be used for a routed file"
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn unrouted_files_still_use_the_default_destination() {
+        let root = temp_dir("route-passthrough");
+        let src = root.join("src");
+        let routed = root.join("routed");
+        let decoy = root.join("decoy");
+        fs::create_dir_all(&src).expect("src");
+        fs::write(src.join("ordinary.md"), b"# ordinary\n").expect("write");
+
+        let config = routed_config(&routed, &decoy);
+        let entries = scan(&src, &config).expect("scan");
+        assert!(entries[0].route.is_none(), "no pattern should match");
+
+        organise(&src, &entries, &config).expect("organise");
+
+        assert!(decoy.join("ordinary.md").exists());
+        assert!(!routed.exists());
+        cleanup(&root);
     }
 
     #[cfg(unix)]
