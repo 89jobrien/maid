@@ -38,11 +38,20 @@ enum Command {
     Completions,
 }
 
-fn resolve_dirs(path: Option<PathBuf>, config: &Config) -> Vec<PathBuf> {
-    match path {
+/// Pairs each target directory with the config that applies to it. An explicit
+/// path loads the nearest `maid.toml` at or above it; with no path, each
+/// configured directory does the same.
+fn targets(path: Option<PathBuf>) -> Result<Vec<(PathBuf, Config)>, MaidError> {
+    let dirs = match path {
         Some(p) => vec![p],
-        None => config.directories.clone(),
-    }
+        None => Config::load()?.directories,
+    };
+    dirs.into_iter()
+        .map(|dir| {
+            let config = Config::load_for(&dir)?;
+            Ok((dir, config))
+        })
+        .collect()
 }
 
 fn main() -> Result<(), MaidError> {
@@ -59,25 +68,23 @@ fn main() -> Result<(), MaidError> {
         return Ok(());
     }
 
-    let config = Config::load()?;
-
     match cli.command {
         Command::Run { path } => {
-            for dir in resolve_dirs(path, &config) {
+            for (dir, config) in targets(path)? {
                 println!("==> {}", dir.display());
                 let entries = organiser::scan(&dir, &config)?;
                 organiser::organise(&dir, &entries, &config)?;
             }
         }
         Command::Preview { path } => {
-            for dir in resolve_dirs(path, &config) {
+            for (dir, config) in targets(path)? {
                 println!("==> {}", dir.display());
                 let entries = organiser::scan(&dir, &config)?;
                 organiser::preview(&entries, &dir, &config)?;
             }
         }
         Command::Undo { path } => {
-            for dir in resolve_dirs(path, &config) {
+            for (dir, _) in targets(path)? {
                 println!("==> {}", dir.display());
                 organiser::undo(&dir)?;
             }
