@@ -94,7 +94,7 @@ jobs:
       # check and test run here: 1.88's rustfmt and clippy are older than the
       # stable toolchain's and would disagree with it, so those stay on the
       # stable job.
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
 
       - uses: taiki-e/install-action@nextest
 
